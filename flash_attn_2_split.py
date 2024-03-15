@@ -12,6 +12,25 @@ def normal_attention(Q, K, V):
     # [q_len, kv_len] @ [kv_len, dim] -> [q_len, dim]
     return attn @ V
 
+class State:
+    def __init__(self, O, m, l):
+        self.O = O
+        self.m = m
+        self.l = l
+    
+    def merge(self, other):
+        m_new = torch.maximum(self.m, other.m)
+        self.l = torch.exp(self.m - m_new) * self.l + torch.exp(other.m - m_new) * other.l
+        self.O = torch.exp(self.m - m_new) * self.O + torch.exp(other.m - m_new) * other.O
+        self.m = m_new
+    
+    def normalize(self):
+        self.O.div_(self.l)
+        return self.O
+    
+    def get_lse(self):
+        return self.m + self.l.log()
+
 # python implementation of flash_attention_2
 def flash_attention_2(Q, K, V):
     # decide the block size for Q and KV
@@ -83,7 +102,10 @@ def flash_attention_2(Q, K, V):
         O_BLOCKS[i].copy_(Oi)
         l_BLOCKS[i].copy_(li)
         m_BLOCKS[i].copy_(mi)
-    return O, l, m
+    # return O, lse
+    local_state = State(O, m, l)
+    local_state.normalize()
+    return local_state.O, local_state.get_lse()
 
 # simulation of flash_attention_2 split-k implementation
 # https://pytorch.org/blog/flash-decoding/
@@ -93,30 +115,20 @@ def flash_attention_split(Q, K, V):
     K_BLOCKS = torch.split(K, SPLIT_SIZE, dim=0)
     V_BLOCKS = torch.split(V, SPLIT_SIZE, dim=0)
     
-    Ois, lis, mis = [], [], []
-    # get O, li, mi for each split
+    local_states = []
+    # get local state for each split
     for i in range(NUM_SPLITS):
-        Oi, lii, mii = flash_attention_2(Q, K_BLOCKS[i], V_BLOCKS[i])
-        Ois.append(Oi)
-        lis.append(lii)
-        mis.append(mii)
+        Oi, lsei = flash_attention_2(Q, K_BLOCKS[i], V_BLOCKS[i])
+        local_states.append(State(Oi, lsei, 1))
         
-    # merge O, li, mi
-    Oi = Ois[0]
-    li = lis[0]
-    mi = mis[0]
+    # merge local states
+    state = local_states[0]
     for i in range(1, NUM_SPLITS):
-        mi_new = torch.maximum(mi, mis[i])
-        li_new = torch.exp(mi - mi_new) * li + torch.exp(mis[i] - mi_new) * lis[i]
-        Oi_new = torch.exp(mi - mi_new) * Oi + torch.exp(mis[i] - mi_new) * Ois[i]
-        
-        Oi = Oi_new
-        li = li_new
-        mi = mi_new
+        state.merge(local_states[i])
     
-    # normalize O
-    O = Oi / li
-    return O
+    # normalize and return
+    state.normalize()
+    return state.O
     
 
 if __name__ == "__main__":
