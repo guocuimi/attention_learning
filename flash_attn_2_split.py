@@ -1,41 +1,18 @@
+#!/usr/bin/env python3
+
 import torch
+from utils import State, ref_attention
 
 BLOCK_SIZE = 2
 NUM_SPLITS = 4
 NEG_INF = -1e10 # -infinity
 EPSILON = 1e-10
 
-def normal_attention(Q, K, V):
-    # [q_len, dim] @ [kv_len, dim] -> [q_len, kv_len]  
-    QKt = torch.einsum('q d, k d -> q k', Q, K)
-    attn = torch.nn.functional.softmax(QKt, dim=-1)
-    # [q_len, kv_len] @ [kv_len, dim] -> [q_len, dim]
-    return attn @ V
-
-class State:
-    def __init__(self, O, m, l):
-        self.O = O
-        self.m = m
-        self.l = l
-    
-    def merge(self, other):
-        m_new = torch.maximum(self.m, other.m)
-        self.l = torch.exp(self.m - m_new) * self.l + torch.exp(other.m - m_new) * other.l
-        self.O = torch.exp(self.m - m_new) * self.O + torch.exp(other.m - m_new) * other.O
-        self.m = m_new
-    
-    def normalize(self):
-        self.O.div_(self.l)
-        return self.O
-    
-    def get_lse(self):
-        return self.m + self.l.log()
-
 # python implementation of flash_attention_2
 def flash_attention_2(Q, K, V):
     # decide the block size for Q and KV
-    Q_BLOCK_SIZE = min(BLOCK_SIZE, Q.shape[-1])
-    KV_BLOCK_SIZE = BLOCK_SIZE
+    Q_BLOCK_SIZE = min(BLOCK_SIZE, Q.shape[0])
+    KV_BLOCK_SIZE = min(BLOCK_SIZE, K.shape[0])
 
     # divide Q into Tr blocks Q1, ..., QTr of size [Q_BLOCK_SIZE, dim]
     Q_BLOCKS = torch.split(Q, Q_BLOCK_SIZE, dim=0)
@@ -104,8 +81,7 @@ def flash_attention_2(Q, K, V):
         m_BLOCKS[i].copy_(mi)
     # return O, lse
     local_state = State(O, m, l)
-    local_state.normalize()
-    return local_state.O, local_state.get_lse()
+    return local_state.normalize(), local_state.get_lse()
 
 # simulation of flash_attention_2 split-k implementation
 # https://pytorch.org/blog/flash-decoding/
@@ -115,16 +91,15 @@ def flash_attention_split(Q, K, V):
     K_BLOCKS = torch.split(K, SPLIT_SIZE, dim=0)
     V_BLOCKS = torch.split(V, SPLIT_SIZE, dim=0)
     
-    local_states = []
+    state = None
     # get local state for each split
     for i in range(NUM_SPLITS):
         Oi, lsei = flash_attention_2(Q, K_BLOCKS[i], V_BLOCKS[i])
-        local_states.append(State(Oi, lsei, 1))
-        
-    # merge local states
-    state = local_states[0]
-    for i in range(1, NUM_SPLITS):
-        state.merge(local_states[i])
+        # merge local states
+        if i == 0:
+            state = State(Oi, lsei, 1)
+        else:
+            state.merge(Oi, lsei, 1)
     
     # normalize and return
     state.normalize()
@@ -141,5 +116,5 @@ if __name__ == "__main__":
     V = torch.randn(kv_len * NUM_SPLITS, dim)
 
     out_splits = flash_attention_split(Q, K, V)
-    ref_out = normal_attention(Q, K, V)
+    ref_out = ref_attention(Q, K, V)
     print(torch.allclose(out_splits, ref_out, atol=1e-5))

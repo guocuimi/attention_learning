@@ -1,22 +1,18 @@
+#!/usr/bin/env python3
+
 import torch
+from utils import ref_attention
 
 BLOCK_SIZE = 2
 NEG_INF = -1e10 # -infinity
 EPSILON = 1e-10
 
-def normal_attention(Q, K, V):
-    # [q_len, dim] @ [kv_len, dim] -> [q_len, kv_len]  
-    QKt = torch.einsum('q d, k d -> q k', Q, K)
-    attn = torch.nn.functional.softmax(QKt, dim=-1)
-    # [q_len, kv_len] @ [kv_len, dim] -> [q_len, dim]
-    return attn @ V
-
 # python implementation of flash_attention_2
 # https://tridao.me/publications/flash2/flash2.pdf
 def flash_attention_2(Q, K, V):
     # decide the block size for Q and KV
-    Q_BLOCK_SIZE = min(BLOCK_SIZE, Q.shape[-1])
-    KV_BLOCK_SIZE = BLOCK_SIZE
+    Q_BLOCK_SIZE = min(BLOCK_SIZE, Q.shape[0])
+    KV_BLOCK_SIZE = min(BLOCK_SIZE, K.shape[0])
 
     # divide Q into Tr blocks Q1, ..., QTr of size [Q_BLOCK_SIZE, dim]
     Q_BLOCKS = torch.split(Q, Q_BLOCK_SIZE, dim=0)
@@ -31,6 +27,7 @@ def flash_attention_2(Q, K, V):
     # [q_len, dim]
     O = torch.empty_like(Q)
     O_BLOCKS = list(torch.split(O, Q_BLOCK_SIZE, dim=0))
+        
 
     for i in range(Tr):
         # load qi from global memory to shared memory
@@ -89,5 +86,5 @@ if __name__ == "__main__":
     V = torch.randn(kv_len, dim)
 
     out_2 = flash_attention_2(Q, K, V)
-    ref_out = normal_attention(Q, K, V)
+    ref_out = ref_attention(Q, K, V)
     print(torch.allclose(out_2, ref_out, atol=1e-5))
