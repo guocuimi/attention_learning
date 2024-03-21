@@ -91,15 +91,16 @@ def flash_attention_split(Q, K, V):
     K_BLOCKS = torch.split(K, SPLIT_SIZE, dim=0)
     V_BLOCKS = torch.split(V, SPLIT_SIZE, dim=0)
     
-    state = None
-    # get local state for each split
+    split_states = []
+    # get local state for each split in parallel
     for i in range(NUM_SPLITS):
         Oi, lsei = flash_attention_2(Q, K_BLOCKS[i], V_BLOCKS[i])
-        # merge local states
-        if i == 0:
-            state = State(Oi, lsei, 1)
-        else:
-            state.merge(Oi, lsei, 1)
+        split_states.append(State(Oi, lsei, 1))
+
+    # merge split states in seperate kernel
+    state = split_states[0]
+    for i in range(1, NUM_SPLITS):
+        state.merge(split_states[i])
     
     # normalize and return
     state.normalize()

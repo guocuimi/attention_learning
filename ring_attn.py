@@ -41,12 +41,13 @@ def ring_attention(Q, K, V):
     # steps equal to the number of devices/processes
     steps = dist.get_world_size()
     
-    k, v = K, V
-    for step in range(steps):
-        # allocate memory for the next k and v
-        next_k = torch.empty_like(k)
-        next_v = torch.empty_like(v)
-        
+    # allocate memory for k, v
+    # make a copy to avoid modifying the input
+    k = K.clone()
+    v = V.clone()
+    next_k = torch.empty_like(k)
+    next_v = torch.empty_like(v)
+    for step in range(steps):        
         # send and receive kv asynchronously
         # to overlap communication and computation
         if step != steps - 1:
@@ -56,7 +57,7 @@ def ring_attention(Q, K, V):
         O, lse = flash_attention_2(Q, k, v)
         
         # merge the local states
-        if step == 0:
+        if state is None:
             state = State(O, lse, 1)
         else:
             state.merge(O, lse, 1)
@@ -65,8 +66,9 @@ def ring_attention(Q, K, V):
         if step != steps - 1:
             ring.wait()
 
-        # update k and v for the next step
-        k, v = next_k, next_v
+        # swap k, v and next_k, next_v
+        k, next_k = next_k, k
+        v, next_v = next_v, v
         
     # normalize the attention scores
     return state.normalize()
